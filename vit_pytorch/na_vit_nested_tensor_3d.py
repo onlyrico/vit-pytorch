@@ -6,9 +6,6 @@ from functools import partial
 import torch
 import packaging.version as pkg_version
 
-if pkg_version.parse(torch.__version__) < pkg_version.parse('2.4'):
-    print('nested tensor NaViT was tested on pytorch 2.4')
-
 from torch import nn, Tensor
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList
@@ -44,7 +41,7 @@ def FeedForward(dim, hidden_dim, dropout = 0.):
     )
 
 class Attention(Module):
-    def __init__(self, dim, heads = 8, dim_head = 64, dropout = 0.):
+    def __init__(self, dim, heads = 8, dim_head = 64, dropout = 0., qk_norm = True):
         super().__init__()
         self.norm = nn.LayerNorm(dim, bias = False)
 
@@ -59,8 +56,8 @@ class Attention(Module):
         # in the paper, they employ qk rmsnorm, a way to stabilize attention
         # will use layernorm in place of rmsnorm, which has been shown to work in certain papers. requires l2norm on non-ragged dimension to be supported in nested tensors
 
-        self.query_norm = nn.LayerNorm(dim_head, bias = False)
-        self.key_norm = nn.LayerNorm(dim_head, bias = False)
+        self.query_norm = nn.LayerNorm(dim_head, bias = False) if qk_norm else nn.Identity()
+        self.key_norm = nn.LayerNorm(dim_head, bias = False) if qk_norm else nn.Identity()
 
         self.dropout = dropout
 
@@ -77,17 +74,6 @@ class Attention(Module):
         # for attention pooling, one query pooling to entire sequence
 
         context = default(context, x)
-
-        # queries, keys, values
-
-        query = self.to_queries(x)
-        key = self.to_keys(context)
-        value = self.to_values(context)
-
-        # split heads
-
-        def split_heads(t):
-            return t.unflatten(-1, (self.heads, self.dim_head)).transpose(1, 2).contiguous()
 
         # queries, keys, values
 
@@ -126,13 +112,13 @@ class Attention(Module):
         return self.to_out(out)
 
 class Transformer(Module):
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0., qk_norm = True):
         super().__init__()
         self.layers = ModuleList([])
 
         for _ in range(depth):
             self.layers.append(ModuleList([
-                Attention(dim, heads = heads, dim_head = dim_head, dropout = dropout),
+                Attention(dim, heads = heads, dim_head = dim_head, dropout = dropout, qk_norm = qk_norm),
                 FeedForward(dim, mlp_dim, dropout = dropout)
             ]))
 
@@ -164,10 +150,14 @@ class NaViT(Module):
         dropout = 0.,
         emb_dropout = 0.,
         num_registers = 4,
+        qk_rmsnorm = True,
         token_dropout_prob: float | None = None
     ):
         super().__init__()
         image_height, image_width = pair(image_size)
+
+        if pkg_version.parse(torch.__version__) < pkg_version.parse('2.5'):
+            print('nested tensor NaViT was tested on pytorch 2.5')
 
         # what percent of tokens to dropout
         # if int or float given, then assume constant dropout prob
@@ -209,7 +199,7 @@ class NaViT(Module):
 
         self.dropout = nn.Dropout(emb_dropout)
 
-        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout, qk_rmsnorm)
 
         # final attention pooling queries
 
@@ -336,7 +326,7 @@ class NaViT(Module):
 
 if __name__ == '__main__':
 
-    # works for torch 2.4
+    # works for torch 2.5
 
     v = NaViT(
         image_size = 256,
@@ -362,3 +352,5 @@ if __name__ == '__main__':
     ]
 
     assert v(volumes).shape == (5, 1000)
+
+    v(volumes).sum().backward()
